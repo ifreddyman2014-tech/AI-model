@@ -135,7 +135,7 @@ def download_videos(url: str, output_dir: str, cookies_file: str | None = None) 
 
 def get_cookies_from_browser(browser: str) -> str | None:
     """Пробует получить cookies из браузера автоматически."""
-    supported = ["chrome", "firefox", "safari", "edge", "chromium", "brave"]
+    supported = ["chrome", "firefox", "safari", "edge", "chromium", "brave", "opera", "vivaldi", "whale"]
     if browser.lower() not in supported:
         print(f"Браузер '{browser}' не поддерживается. Доступные: {', '.join(supported)}")
         return None
@@ -186,7 +186,7 @@ def main():
     parser.add_argument(
         "-b", "--browser",
         default=None,
-        help="Браузер для получения cookies автоматически (chrome, firefox, safari, edge)",
+        help="Браузер для получения cookies автоматически (chrome, firefox, safari, edge, opera, brave)",
     )
 
     args = parser.parse_args()
