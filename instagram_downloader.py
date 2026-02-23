@@ -214,7 +214,18 @@ def main():
             print("\nЗагрузка завершена!")
             return
         except Exception as e:
-            print(f"Ошибка: {e}")
+            err = str(e)
+            print(f"Ошибка: {err}")
+            if "cookie" in err.lower() or "chrome" in err.lower():
+                print("\nНе удалось получить cookies из браузера.")
+                print("Причины: браузер открыт, нет доступа к профилю, или проблема с шифрованием.")
+                print("\nРешение — экспортировать cookies вручную:")
+                print("  1. Установите расширение 'Get cookies.txt LOCALLY' в браузере")
+                print("     Opera: Меню → Расширения → Магазин Chrome → найдите расширение")
+                print("  2. Войдите в Instagram в браузере")
+                print("  3. Откройте instagram.com, нажмите на значок расширения → Export")
+                print("  4. Сохраните файл как cookies.txt в папку с instagram_downloader.py")
+                print("  5. Запустите: python instagram_downloader.py <url> -c cookies.txt")
             sys.exit(1)
 
     download_videos(url, args.output, cookies_file)
