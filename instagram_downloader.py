@@ -14,6 +14,7 @@ Instagram Video Downloader
 """
 
 import argparse
+import http.cookiejar
 import os
 import re
 import sys
@@ -21,10 +22,10 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 try:
-    import yt_dlp
+    import instaloader
 except ImportError:
-    print("Ошибка: yt-dlp не установлен.")
-    print("Установите его командой: pip install yt-dlp")
+    print("Ошибка: instaloader не установлен.")
+    print("Установите его командой: pip install instaloader")
     sys.exit(1)
 
 
@@ -53,32 +54,35 @@ def parse_instagram_url(url: str) -> dict:
     return {"type": "unknown", "url": url}
 
 
-def build_ydl_opts(output_dir: str, cookies_file: str | None = None) -> dict:
-    """Формирует настройки для yt-dlp."""
-    output_path = os.path.join(output_dir, "%(uploader)s_%(upload_date)s_%(id)s.%(ext)s")
+def load_cookies_from_file(cookies_file: str) -> dict:
+    """Загружает cookies из Netscape-формата cookies.txt."""
+    jar = http.cookiejar.MozillaCookieJar()
+    try:
+        jar.load(cookies_file, ignore_discard=True, ignore_expires=True)
+    except Exception as e:
+        print(f"Ошибка чтения cookies.txt: {e}")
+        sys.exit(1)
+    cookies = {c.name: c.value for c in jar if "instagram.com" in c.domain}
+    if not cookies:
+        print("Предупреждение: в cookies.txt не найдены cookies для instagram.com")
+    return cookies
 
-    opts = {
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "outtmpl": output_path,
-        "ignoreerrors": True,
-        "no_warnings": False,
-        "quiet": False,
-        "progress": True,
-        "postprocessors": [
-            {
-                "key": "FFmpegVideoConvertor",
-                "preferedformat": "mp4",
-            }
-        ],
-        "socket_timeout": 30,
-        "retries": 5,
-        "fragment_retries": 5,
-    }
 
-    if cookies_file:
-        opts["cookiefile"] = cookies_file
-
-    return opts
+def build_instaloader(output_dir: str, cookies: dict | None = None) -> instaloader.Instaloader:
+    """Создаёт и настраивает экземпляр Instaloader."""
+    L = instaloader.Instaloader(
+        download_videos=True,
+        download_video_thumbnails=False,
+        download_geotags=False,
+        download_comments=False,
+        save_metadata=False,
+        post_metadata_txt_pattern="",
+        dirname_pattern=output_dir,
+        filename_pattern="{owner_username}_{date_utc:%Y%m%d}_{mediaid}",
+    )
+    if cookies:
+        L.context._session.cookies.update(cookies)
+    return L
 
 
 def download_videos(url: str, output_dir: str, cookies_file: str | None = None) -> None:
@@ -93,53 +97,74 @@ def download_videos(url: str, output_dir: str, cookies_file: str | None = None) 
     print(f"URL: {url}")
     print(f"Папка для сохранения: {output_path.resolve()}\n")
 
-    # Для профиля добавляем флаг для скачивания всех постов
-    download_url = url
-    extra_opts = {}
+    cookies = None
+    if cookies_file:
+        cookies = load_cookies_from_file(cookies_file)
 
-    if content_type == "profile":
-        print(f"Скачивание всех видео профиля: {url_info.get('username', '')}")
-        # yt-dlp автоматически обходит все посты профиля
-        extra_opts["playlistend"] = None  # все посты
-
-    ydl_opts = build_ydl_opts(output_dir, cookies_file)
-    ydl_opts.update(extra_opts)
-
-    # Фильтр — скачиваем только видео, пропускаем фото
-    ydl_opts["match_filter"] = yt_dlp.utils.match_filter_func("!is_live")
+    L = build_instaloader(str(output_path), cookies)
 
     print("=" * 50)
     print("Начинаем загрузку...")
     print("=" * 50)
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            result = ydl.download([download_url])
+        if content_type == "profile":
+            username = url_info["username"]
+            print(f"Скачивание всех видео профиля: {username}")
+            profile = instaloader.Profile.from_username(L.context, username)
+            count = 0
+            for post in profile.get_posts():
+                if post.is_video:
+                    L.download_post(post, target=output_path)
+                    count += 1
+            print(f"\nЗагрузка завершена! Скачано видео: {count}")
 
-        if result == 0:
-            print("\nЗагрузка завершена успешно!")
+        elif content_type == "post":
+            match = re.search(r"/(p|reel)/([A-Za-z0-9_-]+)", url)
+            if not match:
+                print("Ошибка: не удалось извлечь shortcode из URL")
+                sys.exit(1)
+            shortcode = match.group(2)
+            post = instaloader.Post.from_shortcode(L.context, shortcode)
+            if not post.is_video:
+                print("Это фото, не видео. Скачивание пропущено.")
+                return
+            L.download_post(post, target=output_path)
+            print("\nЗагрузка завершена!")
+
+        elif content_type == "stories":
+            match = re.search(r"/stories/([\w.]+)", url)
+            if not match:
+                print("Ошибка: не удалось извлечь имя пользователя из URL сторис")
+                sys.exit(1)
+            stories_user = match.group(1)
+            profile = instaloader.Profile.from_username(L.context, stories_user)
+            L.download_stories(userids=[profile.userid], filename_target=output_path)
+            print("\nЗагрузка завершена!")
+
         else:
-            print(f"\nЗагрузка завершена с кодом: {result}")
+            print(f"Неизвестный тип URL: {url}")
+            sys.exit(1)
 
-    except yt_dlp.utils.DownloadError as e:
-        print(f"\nОшибка загрузки: {e}")
-        print("\nВозможные причины:")
-        print("  - Приватный аккаунт (требуется авторизация через cookies)")
-        print("  - Instagram заблокировал запрос (попробуйте позже)")
-        print("  - Неверный URL")
+    except instaloader.exceptions.ProfileNotExistsException:
+        print("\nОшибка: профиль не найден или аккаунт удалён")
+        sys.exit(1)
+    except instaloader.exceptions.PrivateProfileNotFollowedException:
+        print("\nОшибка: приватный аккаунт. Войдите в Instagram и экспортируйте cookies.")
+        print("  1. Установите расширение 'Get cookies.txt LOCALLY'")
+        print("  2. Откройте instagram.com, нажмите Export")
+        print("  3. Запустите: python instagram_downloader.py <url> -c cookies.txt")
+        sys.exit(1)
+    except instaloader.exceptions.LoginRequiredException:
+        print("\nОшибка: требуется авторизация. Используйте -c cookies.txt")
+        sys.exit(1)
+    except instaloader.exceptions.ConnectionException as e:
+        print(f"\nОшибка соединения: {e}")
+        print("Instagram мог заблокировать запрос. Попробуйте позже.")
         sys.exit(1)
     except KeyboardInterrupt:
         print("\n\nЗагрузка прервана пользователем.")
         sys.exit(0)
-
-
-def get_cookies_from_browser(browser: str) -> str | None:
-    """Пробует получить cookies из браузера автоматически."""
-    supported = ["chrome", "firefox", "safari", "edge", "chromium", "brave", "opera", "vivaldi", "whale"]
-    if browser.lower() not in supported:
-        print(f"Браузер '{browser}' не поддерживается. Доступные: {', '.join(supported)}")
-        return None
-    return f"--cookies-from-browser {browser}"
 
 
 def main():
@@ -159,9 +184,6 @@ def main():
 
   # Использовать cookies файл (для приватных аккаунтов)
   python instagram_downloader.py https://www.instagram.com/username/ -c cookies.txt
-
-  # Использовать cookies из браузера (Chrome, Firefox и др.)
-  python instagram_downloader.py https://www.instagram.com/username/ -b chrome
 
 Как получить cookies.txt:
   Установите расширение "Get cookies.txt LOCALLY" в браузере,
@@ -186,7 +208,7 @@ def main():
     parser.add_argument(
         "-b", "--browser",
         default=None,
-        help="Браузер для получения cookies автоматически (chrome, firefox, safari, edge, opera, brave)",
+        help="(Устарело) Используйте -c cookies.txt вместо этого флага",
     )
 
     args = parser.parse_args()
@@ -196,39 +218,17 @@ def main():
     if not url.startswith("http"):
         url = "https://" + url
 
-    cookies_file = args.cookies
-    if args.browser and not cookies_file:
-        # Если указан браузер — передаём это в yt-dlp через специальный параметр
-        print(f"Используем cookies из браузера: {args.browser}")
-        # yt-dlp поддерживает cookiesfrombrowser напрямую
-        import tempfile
-        ydl_opts_check = build_ydl_opts(args.output)
-        ydl_opts_check["cookiesfrombrowser"] = (args.browser,)
+    if args.browser and not args.cookies:
+        print(f"Автоматическое получение cookies из '{args.browser}' не поддерживается.")
+        print("\nЭкспортируйте cookies вручную:")
+        print("  1. Установите расширение 'Get cookies.txt LOCALLY' в браузере")
+        print("     Opera: Меню → Расширения → Магазин Chrome → найдите расширение")
+        print("  2. Войдите в Instagram, откройте instagram.com")
+        print("  3. Нажмите на иконку расширения → Export → сохраните как cookies.txt")
+        print("  4. Запустите: python instagram_downloader.py <url> -c cookies.txt")
+        sys.exit(0)
 
-        output_path = Path(args.output)
-        output_path.mkdir(parents=True, exist_ok=True)
-
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts_check) as ydl:
-                ydl.download([url])
-            print("\nЗагрузка завершена!")
-            return
-        except Exception as e:
-            err = str(e)
-            print(f"Ошибка: {err}")
-            if "cookie" in err.lower() or "chrome" in err.lower():
-                print("\nНе удалось получить cookies из браузера.")
-                print("Причины: браузер открыт, нет доступа к профилю, или проблема с шифрованием.")
-                print("\nРешение — экспортировать cookies вручную:")
-                print("  1. Установите расширение 'Get cookies.txt LOCALLY' в браузере")
-                print("     Opera: Меню → Расширения → Магазин Chrome → найдите расширение")
-                print("  2. Войдите в Instagram в браузере")
-                print("  3. Откройте instagram.com, нажмите на значок расширения → Export")
-                print("  4. Сохраните файл как cookies.txt в папку с instagram_downloader.py")
-                print("  5. Запустите: python instagram_downloader.py <url> -c cookies.txt")
-            sys.exit(1)
-
-    download_videos(url, args.output, cookies_file)
+    download_videos(url, args.output, args.cookies)
 
 
 if __name__ == "__main__":
